@@ -232,19 +232,30 @@ def fetch_trials(company_name: str) -> dict:
 
 
 # ── CMS Open Payments ─────────────────────────────────────────────────────────
+#
+# The 2024 dataset (5ia3-vtt7) is a SOCRATA/SODA endpoint.
+# Correct base URL: https://openpaymentsdata.cms.gov/resource/{id}.json
+# Query syntax: standard SoQL ($where, $limit, $order, $select)
+# NOT the DKAN /api/1/datastore/sql format (that was the bug all along).
+#
+# Dataset IDs (Socrata resource IDs, updated each June):
+#   2024: 5ia3-vtt7
+#   2023: wjm5-k45b   (general payments 2023)
+#
+# Field: applicable_manufacturer_or_applicable_gpo_making_payment_name
 
-DATASETS = {
-    2024: "5ia3-vtt7",
-    2023: "fb3a65aa-c901-4a38-a813-b04b00dfa2a9",
-}
-OP_BASE = "https://openpaymentsdata.cms.gov/api/1/datastore"
+SODA_BASE = "https://openpaymentsdata.cms.gov/resource"
+SODA_DATASETS = ["5ia3-vtt7", "wjm5-k45b"]  # 2024, 2023
 
 
-def _op_sql(dataset_id: str, sql: str) -> list:
+def _soda_get(dataset_id: str, params: dict) -> list:
+    """Query a Socrata/SODA endpoint."""
     try:
-        r = requests.get(f"{OP_BASE}/sql",
-                         params={"query": sql, "show_db_columns": "true"},
-                         timeout=TIMEOUT)
+        r = requests.get(
+            f"{SODA_BASE}/{dataset_id}.json",
+            params=params,
+            timeout=TIMEOUT,
+        )
         r.raise_for_status()
         d = r.json()
         return d if isinstance(d, list) else []
@@ -252,106 +263,95 @@ def _op_sql(dataset_id: str, sql: str) -> list:
         return []
 
 
-def _op_query(dataset_id: str, conditions: list, limit=500) -> list:
-    params = {
-        "results_format": "objects", "keys": "true",
-        "limit": limit, "offset": 0,
-        "sort[0][property]": "total_amount_of_payment_usdollars",
-        "sort[0][order]": "desc",
-    }
-    for i, c in enumerate(conditions):
-        params[f"conditions[{i}][property]"] = c["property"]
-        params[f"conditions[{i}][value]"]    = c["value"]
-        params[f"conditions[{i}][operator]"] = c.get("operator", "=")
-    try:
-        r = requests.get(f"{OP_BASE}/query/{dataset_id}/0",
-                         params=params, timeout=TIMEOUT)
-        r.raise_for_status()
-        d = r.json()
-        return d.get("results") or d.get("data") or (d if isinstance(d, list) else [])
-    except Exception:
-        return []
-
-
-def _op_field(row, *keys):
-    for k in keys:
-        for candidate in [k, k.lower(), k.title()]:
-            v = row.get(candidate)
-            if v:
-                return v
-    return ""
-
-
-def resolve_company_id(company_name: str):
-    escaped = company_name.replace("'", "''")
-    for year, ds_id in DATASETS.items():
-        sql = (
-            f"[SELECT applicable_manufacturer_or_applicable_gpo_making_payment_id,"
-            f"applicable_manufacturer_or_applicable_gpo_making_payment_name "
-            f"FROM {ds_id}]"
-            f"[WHERE applicable_manufacturer_or_applicable_gpo_making_payment_name "
-            f'LIKE "%{escaped}%"][LIMIT 5]'
-        )
-        rows = _op_sql(ds_id, sql)
-        if rows:
-            row  = rows[0]
-            cid  = row.get("applicable_manufacturer_or_applicable_gpo_making_payment_id")
-            name = row.get("applicable_manufacturer_or_applicable_gpo_making_payment_name", company_name)
-            if cid:
-                return str(cid), name
-    return None, company_name
-
-
 def fetch_payments(company_name: str) -> dict:
-    company_id, resolved_name = resolve_company_id(company_name)
-    if not company_id:
+    """
+    Fetch Open Payments data using the Socrata SODA API.
+    Tries name LIKE search across current + prior year datasets.
+    Aggregates: total by year, payment type, state, top KOLs.
+    """
+    escaped = company_name.replace("'", "''")
+
+    # Step 1: Find exact company name as stored in database
+    # (may differ in punctuation/caps from what user typed)
+    resolved_name = company_name
+    for ds_id in SODA_DATASETS:
+        rows = _soda_get(ds_id, {
+            "$select": "applicable_manufacturer_or_applicable_gpo_making_payment_name,"
+                       "applicable_manufacturer_or_applicable_gpo_making_payment_id",
+            "$where":  f"upper(applicable_manufacturer_or_applicable_gpo_making_payment_name) "
+                       f"LIKE upper('%{escaped}%')",
+            "$limit":  "5",
+        })
+        if rows:
+            resolved_name = rows[0].get(
+                "applicable_manufacturer_or_applicable_gpo_making_payment_name",
+                company_name
+            )
+            company_id = rows[0].get(
+                "applicable_manufacturer_or_applicable_gpo_making_payment_id", ""
+            )
+            break
+    else:
         return {
-            "error": f"'{company_name}' not found in Open Payments. Try the exact legal name.",
-            "resolved_name": company_name, "company_id": None,
+            "error": f"'%{company_name}%' not found in Open Payments. "
+                     "Check the exact legal name on openpaymentsdata.cms.gov.",
+            "resolved_name": company_name,
+            "company_id": None,
         }
 
+    # Step 2: Pull up to 500 records per dataset year using resolved name
     all_rows = []
-    for year, ds_id in DATASETS.items():
-        rows = _op_query(ds_id, [{
-            "property": "applicable_manufacturer_or_applicable_gpo_making_payment_id",
-            "value": company_id, "operator": "=",
-        }], limit=500)
+    safe_name = resolved_name.replace("'", "''")
+    for ds_id in SODA_DATASETS:
+        rows = _soda_get(ds_id, {
+            "$where":  f"applicable_manufacturer_or_applicable_gpo_making_payment_name="
+                       f"'{safe_name}'",
+            "$order":  "total_amount_of_payment_usdollars DESC",
+            "$limit":  "500",
+            "_source": ds_id,  # carried through for year tagging
+        })
+        # Tag with dataset year (first 4 chars of id aren't year — use index)
+        year = "2024" if ds_id == SODA_DATASETS[0] else "2023"
         for r in rows:
-            r["_program_year"] = year
+            r["_year"] = year
         all_rows.extend(rows)
 
     if not all_rows:
         return {
-            "error": f"Found company ID {company_id} but no payment records returned.",
-            "resolved_name": resolved_name, "company_id": company_id,
+            "error": f"Found '{resolved_name}' in name lookup but no payment records returned.",
+            "resolved_name": resolved_name,
+            "company_id": company_id,
         }
 
+    # Step 3: Aggregate
     total_paid = 0.0
-    by_year    = defaultdict(float)
-    by_type    = defaultdict(float)
-    by_state   = defaultdict(float)
-    physicians = defaultdict(lambda: {"total": 0.0, "count": 0, "specialty": "", "state": ""})
+    by_year    = {}
+    by_type    = {}
+    by_state   = {}
+    physicians = {}
 
     for p in all_rows:
-        amt = float(_op_field(p, "total_amount_of_payment_usdollars") or 0)
+        amt = float(p.get("total_amount_of_payment_usdollars") or 0)
         total_paid += amt
-        year  = str(p.get("_program_year") or _op_field(p, "program_year") or "Unknown")
-        by_year[year] += amt
-        ptype = _op_field(p, "nature_of_payment_or_transfer_of_value") or "Other"
-        by_type[ptype] += amt
-        state = _op_field(p, "recipient_state") or "Unknown"
-        by_state[state] += amt
-        first = _op_field(p, "covered_recipient_first_name", "physician_first_name")
-        last  = _op_field(p, "covered_recipient_last_name",  "physician_last_name")
+
+        year = p.get("program_year") or p.get("_year", "Unknown")
+        by_year[str(year)] = by_year.get(str(year), 0.0) + amt
+
+        ptype = p.get("nature_of_payment_or_transfer_of_value") or "Other"
+        by_type[ptype] = by_type.get(ptype, 0.0) + amt
+
+        state = p.get("recipient_state") or "Unknown"
+        by_state[state] = by_state.get(state, 0.0) + amt
+
+        first = p.get("covered_recipient_first_name") or p.get("physician_first_name") or ""
+        last  = p.get("covered_recipient_last_name")  or p.get("physician_last_name")  or ""
         name  = f"{first} {last}".strip()
         if len(name) > 2:
-            spec  = _op_field(p, "covered_recipient_specialty_1", "physician_specialty")
-            physicians[name]["total"]   += amt
-            physicians[name]["count"]   += 1
-            if not physicians[name]["specialty"] and spec:
-                physicians[name]["specialty"] = spec
-            if not physicians[name]["state"] and state != "Unknown":
-                physicians[name]["state"] = state
+            spec  = p.get("covered_recipient_specialty_1") or p.get("physician_specialty") or ""
+            if name not in physicians:
+                physicians[name] = {"total": 0.0, "count": 0, "specialty": spec, "state": state}
+            physicians[name]["total"] += amt
+            physicians[name]["count"] += 1
 
     return {
         "resolved_name": resolved_name,
@@ -362,7 +362,7 @@ def fetch_payments(company_name: str) -> dict:
         "by_type":       dict(sorted(by_type.items(), key=lambda x: x[1], reverse=True)),
         "by_state":      dict(sorted(by_state.items(), key=lambda x: x[1], reverse=True)),
         "top_kols":      sorted(physicians.items(), key=lambda x: x[1]["total"], reverse=True)[:20],
-        "cms_url":       f"https://openpaymentsdata.cms.gov/company/{company_id}",
+        "cms_url":       f"https://openpaymentsdata.cms.gov/company/{company_id}" if company_id else "",
     }
 
 
