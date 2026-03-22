@@ -8,10 +8,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 
-from modules.fda         import fetch_fei, fetch_510k, fetch_pma, fetch_maude, fetch_recalls
-from modules.trials      import fetch_trials
-from modules.payments    import fetch_payments
-from modules.sec_spending import fetch_sec, fetch_spending, fetch_nih
+from data_modules import fetch_fei, fetch_510k, fetch_pma, fetch_maude, fetch_recalls
+from data_modules import fetch_trials
+from data_modules import fetch_payments
+from data_modules import fetch_sec, fetch_spending, fetch_nih
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
