@@ -262,6 +262,14 @@ def _soda_get(dataset_id: str, params: dict) -> list:
     except Exception:
         return []
 
+def fetch_payments(company_name):
+    import requests
+    r = requests.get(
+        "https://openpaymentsdata.cms.gov/resource/5ia3-vtt7.json",
+        params={"$limit": "3", "$where": "applicable_manufacturer_or_applicable_gpo_making_payment_name='Intuitive Surgical, Inc.'"},
+        timeout=20
+    )
+    return {"debug_status": r.status_code, "debug_body": r.text[:500], "error": "debug mode"}
 
 def fetch_payments(company_name: str) -> dict:
     """
