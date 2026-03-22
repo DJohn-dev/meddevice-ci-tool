@@ -262,51 +262,37 @@ def _soda_get(dataset_id: str, params: dict) -> list:
     except Exception:
         return []
 
-def fetch_payments(company_name):
-    import requests
-    r = requests.get(
-        "https://openpaymentsdata.cms.gov/resource/5ia3-vtt7.json",
-        params={"$limit": "3", "$where": "applicable_manufacturer_or_applicable_gpo_making_payment_name='Intuitive Surgical, Inc.'"},
-        timeout=20
-    )
-    return {"debug_status": r.status_code, "debug_body": r.text[:500], "error": "debug mode"}
+
 
 def fetch_payments(company_name: str) -> dict:
-    """
-    Fetch Open Payments data using the Socrata SODA API.
-    Tries name LIKE search across current + prior year datasets.
-    Aggregates: total by year, payment type, state, top KOLs.
-    """
-    escaped = company_name.replace("'", "''")
+    # DEBUG — testing API connectivity and field names
+    r1 = requests.get(
+        "https://openpaymentsdata.cms.gov/resource/5ia3-vtt7.json",
+        params={"$limit": "2"},
+        timeout=20
+    )
 
-    # Step 1: Find exact company name as stored in database
-    # (may differ in punctuation/caps from what user typed)
-    resolved_name = company_name
-    for ds_id in SODA_DATASETS:
-        rows = _soda_get(ds_id, {
-            "$select": "applicable_manufacturer_or_applicable_gpo_making_payment_name,"
-                       "applicable_manufacturer_or_applicable_gpo_making_payment_id",
-            "$where":  f"upper(applicable_manufacturer_or_applicable_gpo_making_payment_name) "
-                       f"LIKE upper('%{escaped}%')",
-            "$limit":  "5",
-        })
-        if rows:
-            resolved_name = rows[0].get(
-                "applicable_manufacturer_or_applicable_gpo_making_payment_name",
-                company_name
-            )
-            company_id = rows[0].get(
-                "applicable_manufacturer_or_applicable_gpo_making_payment_id", ""
-            )
-            break
-    else:
-        return {
-            "error": f"'%{company_name}%' not found in Open Payments. "
-                     "Check the exact legal name on openpaymentsdata.cms.gov.",
-            "resolved_name": company_name,
-            "company_id": None,
-        }
+    r2 = requests.get(
+        "https://openpaymentsdata.cms.gov/resource/5ia3-vtt7.json",
+        params={
+            "$where": "applicable_manufacturer_or_applicable_gpo_making_payment_name='Intuitive Surgical, Inc.'",
+            "$limit": "2"
+        },
+        timeout=20
+    )
 
+    sample = r1.json() if r1.ok else []
+    return {
+        "error": "DEBUG MODE",
+        "test1_status": r1.status_code,
+        "test1_fields": list(sample[0].keys()) if sample else "no rows",
+        "test1_sample_name": sample[0].get(
+            "applicable_manufacturer_or_applicable_gpo_making_payment_name", "FIELD NOT FOUND"
+        ) if sample else "n/a",
+        "test2_status": r2.status_code,
+        "test2_count": len(r2.json()) if r2.ok else "error",
+        "test2_body": r2.text[:300],
+    }
     # Step 2: Pull up to 500 records per dataset year using resolved name
     all_rows = []
     safe_name = resolved_name.replace("'", "''")
