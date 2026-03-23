@@ -242,7 +242,7 @@ def render_trials(data, num):
             orientation="h", text=list(statuses.values()),
             color_discrete_sequence=["#3b82f6"])
         fig.update_traces(textposition="outside")
-        fig.update_layout(**plotly_config(), height=180, showlegend=False, xaxis_title="", yaxis_title="")
+        fig.update_layout(**plotly_config(), height=180, showlegend=False, xaxis=dict(title=None, gridcolor="#f1f5f9", linecolor="#e2e8f0"), yaxis=dict(title=None, gridcolor="#f1f5f9", linecolor="#e2e8f0"))
         st.plotly_chart(fig, use_container_width=True)
     df = pd.DataFrame([{"NCT ID": i["nct_id"], "Title": i["title"][:70],
         "Phase": i["phase"], "Status": i["status"], "Enrollment": i["enrollment"],
