@@ -168,12 +168,27 @@ def fetch_maude(company_name: str) -> dict:
 # ── FDA Recalls ───────────────────────────────────────────────────────────────
 
 def fetch_recalls(company_name: str) -> dict:
-    d = _fda_query_with_fallback(
-        f"{BASE}/device/recall.json",
-        "recalling_firm",
-        company_name,
-        {"limit": 20, "sort": "recall_initiation_date:desc"},
-    )
+    # openFDA recalling_firm is tokenized — search first meaningful word for best results
+    # e.g. "Intuitive Surgical, Inc." -> search "Intuitive"
+    first_word = company_name.replace(",", "").replace(".", "").split()[0]
+    
+    # Try progressively: first word, first two words, full name
+    search_terms = [first_word]
+    parts = company_name.replace(",", "").replace(".", "").split()
+    if len(parts) >= 2:
+        search_terms.append(f"{parts[0]} {parts[1]}")
+    search_terms.append(company_name)
+    
+    d = {"results": [], "meta": {}}
+    for term in search_terms:
+        d = _get(f"{BASE}/device/recall.json", {
+            "search": f"recalling_firm:{term}",
+            "limit": 20,
+            "sort": "recall_initiation_date:desc",
+        })
+        if not d.get("error") and d.get("results"):
+            break
+    
     items = []
     for r in d.get("results", []):
         items.append({
@@ -233,19 +248,16 @@ def fetch_trials(company_name: str) -> dict:
 
 # ── CMS Open Payments ─────────────────────────────────────────────────────────
 #
-# The 2024 dataset (5ia3-vtt7) is a SOCRATA/SODA endpoint.
-# Correct base URL: https://openpaymentsdata.cms.gov/resource/{id}.json
-# Query syntax: standard SoQL ($where, $limit, $order, $select)
-# NOT the DKAN /api/1/datastore/sql format (that was the bug all along).
+# openpaymentsdata.cms.gov/resource/* returns 404 — wrong domain for Socrata.
+# The confirmed working Socrata endpoint is data.cms.gov/resource/{id}.json
+# Dataset IDs on data.cms.gov (general payments):
+#   2023: 9bsv-3ct4  (confirmed in prior research, Socrata on data.cms.gov)
+#   Try newer IDs progressively
 #
-# Dataset IDs (Socrata resource IDs, updated each June):
-#   2024: 5ia3-vtt7
-#   2023: wjm5-k45b   (general payments 2023)
-#
-# Field: applicable_manufacturer_or_applicable_gpo_making_payment_name
+# Field name confirmed: applicable_manufacturer_or_applicable_gpo_making_payment_name
 
-SODA_BASE = "https://openpaymentsdata.cms.gov/resource"
-SODA_DATASETS = ["5ia3-vtt7", "wjm5-k45b"]  # 2024, 2023
+SODA_BASE = "https://data.cms.gov/resource"
+SODA_DATASETS = ["9bsv-3ct4", "w8ex-3swy", "7657-5cpe"]  # 2023, 2022, 2021
 
 
 def _soda_get(dataset_id: str, params: dict) -> list:
@@ -263,27 +275,25 @@ def _soda_get(dataset_id: str, params: dict) -> list:
         return []
 
 
-
 def fetch_payments(company_name: str) -> dict:
-    # DEBUG — testing API connectivity and field names
+    # DEBUG: test data.cms.gov Socrata endpoint
     r1 = requests.get(
-        "https://openpaymentsdata.cms.gov/resource/5ia3-vtt7.json",
+        "https://data.cms.gov/resource/9bsv-3ct4.json",
         params={"$limit": "2"},
         timeout=20
     )
-
     r2 = requests.get(
-        "https://openpaymentsdata.cms.gov/resource/5ia3-vtt7.json",
+        "https://data.cms.gov/resource/9bsv-3ct4.json",
         params={
             "$where": "applicable_manufacturer_or_applicable_gpo_making_payment_name='Intuitive Surgical, Inc.'",
-            "$limit": "2"
+            "$limit": "2",
         },
         timeout=20
     )
-
     sample = r1.json() if r1.ok else []
     return {
         "error": "DEBUG MODE",
+        "domain_tested": "data.cms.gov",
         "test1_status": r1.status_code,
         "test1_fields": list(sample[0].keys()) if sample else "no rows",
         "test1_sample_name": sample[0].get(
@@ -293,74 +303,6 @@ def fetch_payments(company_name: str) -> dict:
         "test2_count": len(r2.json()) if r2.ok else "error",
         "test2_body": r2.text[:300],
     }
-    # Step 2: Pull up to 500 records per dataset year using resolved name
-    all_rows = []
-    safe_name = resolved_name.replace("'", "''")
-    for ds_id in SODA_DATASETS:
-        rows = _soda_get(ds_id, {
-            "$where":  f"applicable_manufacturer_or_applicable_gpo_making_payment_name="
-                       f"'{safe_name}'",
-            "$order":  "total_amount_of_payment_usdollars DESC",
-            "$limit":  "500",
-            "_source": ds_id,  # carried through for year tagging
-        })
-        # Tag with dataset year (first 4 chars of id aren't year — use index)
-        year = "2024" if ds_id == SODA_DATASETS[0] else "2023"
-        for r in rows:
-            r["_year"] = year
-        all_rows.extend(rows)
-
-    if not all_rows:
-        return {
-            "error": f"Found '{resolved_name}' in name lookup but no payment records returned.",
-            "resolved_name": resolved_name,
-            "company_id": company_id,
-        }
-
-    # Step 3: Aggregate
-    total_paid = 0.0
-    by_year    = {}
-    by_type    = {}
-    by_state   = {}
-    physicians = {}
-
-    for p in all_rows:
-        amt = float(p.get("total_amount_of_payment_usdollars") or 0)
-        total_paid += amt
-
-        year = p.get("program_year") or p.get("_year", "Unknown")
-        by_year[str(year)] = by_year.get(str(year), 0.0) + amt
-
-        ptype = p.get("nature_of_payment_or_transfer_of_value") or "Other"
-        by_type[ptype] = by_type.get(ptype, 0.0) + amt
-
-        state = p.get("recipient_state") or "Unknown"
-        by_state[state] = by_state.get(state, 0.0) + amt
-
-        first = p.get("covered_recipient_first_name") or p.get("physician_first_name") or ""
-        last  = p.get("covered_recipient_last_name")  or p.get("physician_last_name")  or ""
-        name  = f"{first} {last}".strip()
-        if len(name) > 2:
-            spec  = p.get("covered_recipient_specialty_1") or p.get("physician_specialty") or ""
-            if name not in physicians:
-                physicians[name] = {"total": 0.0, "count": 0, "specialty": spec, "state": state}
-            physicians[name]["total"] += amt
-            physicians[name]["count"] += 1
-
-    return {
-        "resolved_name": resolved_name,
-        "company_id":    company_id,
-        "total_paid":    total_paid,
-        "record_count":  len(all_rows),
-        "by_year":       dict(sorted(by_year.items())),
-        "by_type":       dict(sorted(by_type.items(), key=lambda x: x[1], reverse=True)),
-        "by_state":      dict(sorted(by_state.items(), key=lambda x: x[1], reverse=True)),
-        "top_kols":      sorted(physicians.items(), key=lambda x: x[1]["total"], reverse=True)[:20],
-        "cms_url":       f"https://openpaymentsdata.cms.gov/company/{company_id}" if company_id else "",
-    }
-
-
-# ── SEC EDGAR ─────────────────────────────────────────────────────────────────
 
 def fetch_sec(cik: str) -> dict:
     cik_clean  = str(cik).strip().lstrip("0")

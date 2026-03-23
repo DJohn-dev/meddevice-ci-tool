@@ -453,7 +453,7 @@ def render_sec(data, num, cik):
         empty_state("No CIK entered — SEC filings require a CIK number.")
         tip(
             'Find the CIK for any public company: '
-            '<a href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company=intuitive+surgical&CIK=&type=10-K&dateb=&owner=include&count=10&search_text=&action=getcompany" '
+            '<a href="https://efts.sec.gov/LATEST/search-index?q=%22company%22&forms=10-K" '
             'target="_blank">Search EDGAR company database →</a><br>'
             'Or go to <a href="https://efts.sec.gov/LATEST/search-index?q=%22intuitive+surgical%22&dateRange=custom&startdt=2020-01-01&forms=10-K" target="_blank">EDGAR full-text search →</a> '
             'and the CIK appears in the URL of any result.'
@@ -639,10 +639,9 @@ def main():
             return
         with st.spinner(f"Fetching data for **{name1}**…"):
             data1 = load_all_data(name1, type1, cik1, secs1)
-        st.write("RECALLS:", data1.get("recalls", {}))
-        st.write("PAYMENTS:", data1.get("payments", {}))
         st.subheader(name1)
         render_company(name1, type1, cik1, secs1, data1)
+
     else:
         if not name1 or not name2:
             st.error("Please enter both company names.")
