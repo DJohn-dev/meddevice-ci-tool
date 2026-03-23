@@ -348,8 +348,11 @@ def render_sec(data, num, cik):
     section_header(num, "🟣", "Financial & Corporate", "SEC EDGAR Filings")
     if not cik:
         empty_state("No CIK entered — SEC filings require a CIK number.")
-        tip('Find your company\'s CIK: <a href="https://www.sec.gov/cgi-bin/browse-edgar?company=&CIK=&type=10-K&action=getcompany" target="_blank">EDGAR company search →</a><br>'
-            'Search by company name, then look for the 10-digit CIK in the results.')
+        name = st.session_state.get("company_name", "")
+        encoded = urllib.parse.quote(name.replace(",","").replace(".",""))
+        edgar_url = f"https://www.sec.gov/cgi-bin/browse-edgar?company={encoded}&match=starts-with&filenum=&State=&Country=&SIC=&myowner=exclude&action=getcompany"
+        tip(f'Find your company\'s CIK: <a href="{edgar_url}" target="_blank">Search EDGAR for {name} →</a><br>'
+            'The CIK appears in the URL when you click through to a company.')
         return
     d = data.get("sec", {})
     if d.get("error"):
@@ -446,7 +449,9 @@ def company_form(prefix, label):
         cik = st.text_input("CIK (for SEC filings)", key=f"{prefix}_cik",
                              placeholder="e.g. 1035267")
         if not cik:
-            st.caption("[Find CIK on EDGAR →](https://www.sec.gov/cgi-bin/browse-edgar?company=&CIK=&type=10-K&action=getcompany)")
+            _enc = urllib.parse.quote(name1.replace(",","").replace(".","")) if name1 else ""
+            _edgar = f"https://www.sec.gov/cgi-bin/browse-edgar?company={_enc}&match=starts-with&filenum=&State=&Country=&SIC=&myowner=exclude&action=getcompany"
+            st.caption(f"[Find CIK on EDGAR →]({_edgar})")
     st.markdown("**Include sections:**")
     cols = st.columns(2)
     section_opts = [
