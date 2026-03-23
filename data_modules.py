@@ -265,17 +265,22 @@ PAYMENT_TYPE_CODES = {
 # Dataset identifiers from the metastore catalog (confirmed via /api/1/metastore/schemas/dataset/items)
 SUMMARY_DATASETS = {
     2024: {
-        "dataset_id": "d7e3f320-9ddc-4a5b-8aaf-45048cbd7386",
         "csv_url": "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_SMRY_BY_AMGPO_BY_NTR_OF_PYMT_PGYR2024_P01232026_01102026.csv",
     },
     2023: {
-        "dataset_id": "72008dab-0953-4226-a4cd-9f1872e8170d",
         "csv_url": "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_SMRY_BY_AMGPO_BY_NTR_OF_PYMT_PGYR2023_P01232026_01102026.csv",
     },
     2022: {
-        "dataset_id": "cedcd327-4e5d-43f9-8eb1-c11850fa7c66",
         "csv_url": "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_SMRY_BY_AMGPO_BY_NTR_OF_PYMT_PGYR2022_P01232026_01102026.csv",
     },
+}
+
+# KOL summary: one row per physician per company — fields confirmed from API schema:
+# amgpo_id, covered_recipient_profile_first_name, covered_recipient_profile_last_name,
+# covered_recipient_npi, total_amount, number_of_transaction, payment_type
+KOL_DATASETS = {
+    2023: "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_SMRY_BY_CR_BY_AMGPO_PGYR2023_P01232026_01102026.csv",
+    2024: "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_SMRY_BY_CR_BY_AMGPO_PGYR2024_P01232026_01102026.csv",
 }
 
 
@@ -309,6 +314,31 @@ def _fetch_summary_csv(csv_url: str, company_id: str) -> list:
                 rows.append(row)
         return rows
     except Exception as e:
+        return []
+
+
+def _fetch_kol_csv(csv_url: str, company_id: str) -> list:
+    """
+    Download the covered-recipient-by-company summary CSV and filter by company ID.
+    Fields: amgpo_id, covered_recipient_profile_first_name, covered_recipient_profile_last_name,
+            covered_recipient_npi, recipient_state, total_amount, number_of_transaction
+    """
+    import io, csv
+    try:
+        r = requests.get(csv_url, timeout=45)
+        r.raise_for_status()
+        content = r.content.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(content))
+        rows = []
+        for row in reader:
+            rid = (row.get("amgpo_id") or row.get("AMGPO_ID") or
+                   row.get("AMGPO_Making_Payment_ID") or "").strip()
+            if not rid:
+                rid = company_id if company_id in row.values() else ""
+            if rid == company_id:
+                rows.append(row)
+        return rows
+    except Exception:
         return []
 
 
@@ -420,6 +450,34 @@ def fetch_payments(company_name: str) -> dict:
             "company_id": company_id,
         }
 
+    # Step 3: fetch KOL data from covered-recipient summary CSV
+    top_kols = []
+    by_state  = {}
+    physicians = {}
+
+    for year, kol_url in KOL_DATASETS.items():
+        rows = _fetch_kol_csv(kol_url, company_id)
+        for row in rows:
+            first = (row.get("covered_recipient_profile_first_name") or
+                     row.get("Covered_Recipient_Profile_First_Name") or "").strip()
+            last  = (row.get("covered_recipient_profile_last_name") or
+                     row.get("Covered_Recipient_Profile_Last_Name") or "").strip()
+            name  = f"{first} {last}".strip()
+            amt   = float(row.get("total_amount") or row.get("Total_Amount") or 0)
+            n     = int(row.get("number_of_transaction") or row.get("Number_of_Transaction") or 0)
+            state = (row.get("recipient_state") or row.get("Recipient_State") or "Unknown").strip()
+
+            if len(name) > 2:
+                if name not in physicians:
+                    physicians[name] = {"total": 0.0, "count": 0, "specialty": "", "state": state}
+                physicians[name]["total"] += amt
+                physicians[name]["count"] += n
+
+            if state and state != "Unknown":
+                by_state[state] = by_state.get(state, 0.0) + amt
+
+    top_kols = sorted(physicians.items(), key=lambda x: x[1]["total"], reverse=True)[:20]
+
     return {
         "resolved_name":  resolved_name,
         "company_id":     company_id,
@@ -427,10 +485,10 @@ def fetch_payments(company_name: str) -> dict:
         "record_count":   record_count,
         "by_year":        dict(sorted(by_year.items())),
         "by_type":        dict(sorted(by_type.items(), key=lambda x: x[1], reverse=True)),
-        "by_state":       {},   # not available in summary files
-        "top_kols":       [],   # not available in summary files
+        "by_state":       dict(sorted(by_state.items(), key=lambda x: x[1], reverse=True)),
+        "top_kols":       top_kols,
         "cms_url":        f"https://openpaymentsdata.cms.gov/company/{company_id}",
-        "data_note":      "Summary data only (payment totals by type/year). Individual KOL records require bulk download.",
+        "data_note":      None,
     }
 
 
