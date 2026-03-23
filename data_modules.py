@@ -347,6 +347,25 @@ def _lookup_company_id(company_name: str) -> tuple:
 
 
 def fetch_payments(company_name: str) -> dict:
+    import io, csv
+    # DEBUG: check summary CSV field names and find Intuitive Surgical
+    summary_url = "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_SMRY_BY_AMGPO_BY_NTR_OF_PYMT_PGYR2023_P01232026_01102026.csv"
+    r = requests.get(summary_url, timeout=30)
+    content_csv = r.content.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(content_csv))
+    rows = list(reader)
+    first = rows[0] if rows else {}
+    intuitive = [row for row in rows if "100000005384" in str(row.values())]
+    return {
+        "error": "DEBUG",
+        "status": r.status_code,
+        "total_rows": len(rows),
+        "field_names": list(first.keys()),
+        "first_row": first,
+        "intuitive_rows": intuitive[:3],
+    }
+
+def _real_fetch_payments(company_name: str) -> dict:
     """
     Fetch Open Payments summary data by downloading pre-built CMS summary CSVs.
     These are small files (~6K rows) aggregated by company and payment type.
