@@ -185,11 +185,15 @@ def fetch_recalls(company_name: str) -> dict:
 # ── ClinicalTrials.gov v2 ─────────────────────────────────────────────────────
 
 def fetch_trials(company_name: str) -> dict:
+    # Use first two meaningful words — punctuation in full name causes missed results
+    # e.g. "Intuitive Surgical, Inc." -> "Intuitive Surgical"
+    parts = company_name.replace(",", "").replace(".", "").replace("Inc", "").replace("LLC", "").replace("Corp", "").split()
+    short_name = " ".join(parts[:2]) if len(parts) >= 2 else parts[0] if parts else company_name
     try:
         r = requests.get(
             "https://clinicaltrials.gov/api/v2/studies",
             params={
-                "query.spons": company_name,
+                "query.spons": short_name,
                 "pageSize": 25,
                 "sort": "LastUpdatePostDate:desc",
                 "fields": "NCTId,BriefTitle,Phase,OverallStatus,EnrollmentCount,StartDate,CompletionDate,Condition",
@@ -288,9 +292,17 @@ def _fetch_summary_csv(csv_url: str, company_id: str) -> list:
         rows = []
         for row in reader:
             # Field names vary slightly — try both cases
-            rid = (row.get("AMGPO_Making_Payment_ID") or
-                   row.get("amgpo_id") or
-                   row.get("Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID") or "").strip()
+            # Summary CSV uses lowercase "amgpo_id" (confirmed from API response)
+            # Try all variants for safety
+            rid = (
+                row.get("amgpo_id") or
+                row.get("AMGPO_ID") or
+                row.get("AMGPO_Making_Payment_ID") or
+                row.get("Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID") or ""
+            ).strip()
+            # Last resort: scan all values
+            if not rid:
+                rid = company_id if company_id in row.values() else ""
             if rid == company_id:
                 rows.append(row)
         return rows

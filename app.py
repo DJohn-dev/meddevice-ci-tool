@@ -473,16 +473,8 @@ def main():
 
     with st.sidebar:
         st.header("Configuration")
-        mode = st.radio("Mode", ["Single Company", "Compare Two"], key="mode")
-        st.divider()
-        if mode == "Single Company":
-            name1, type1, cik1, secs1 = company_form("c1", "Company")
-            run = st.button("▶ Run Analysis", type="primary", use_container_width=True)
-        else:
-            name1, type1, cik1, secs1 = company_form("c1", "Company A")
-            st.divider()
-            name2, type2, cik2, secs2 = company_form("c2", "Company B")
-            run = st.button("▶ Run Comparison", type="primary", use_container_width=True)
+        name1, type1, cik1, secs1 = company_form("c1", "Company")
+        run = st.button("▶ Run Analysis", type="primary", use_container_width=True)
         st.divider()
         st.caption("Data cached 1 hour · All calls server-side")
 
@@ -498,43 +490,16 @@ def main():
         </div>""", unsafe_allow_html=True)
         return
 
+    if not name1:
+        st.error("Please enter a company name.")
+        return
+
     st.session_state["company_name"] = name1
 
-    if mode == "Single Company":
-        if not name1:
-            st.error("Please enter a company name.")
-            return
-        with st.spinner(f"Fetching data for **{name1}**…"):
-            data1 = load_all_data(name1, type1, cik1, secs1)
-        st.subheader(name1)
-        render_company(name1, type1, cik1, secs1, data1)
-
-    else:
-        if not name1 or not name2:
-            st.error("Please enter both company names.")
-            return
-        with st.spinner(f"Fetching {name1} and {name2}…"):
-            data1 = load_all_data(name1, type1, cik1, secs1)
-            st.session_state["company_name"] = name1
-            data2 = load_all_data(name2, type2, cik2, secs2)
-
-        section_order = ["fei","510k","maude","recalls","trials","payments","sec","spending"]
-        num = 1
-        for sec in section_order:
-            in1 = sec in secs1
-            in2 = sec in secs2
-            if not in1 and not in2: continue
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.markdown(f"##### 🅐 {name1}")
-                if in1: render_section(sec, data1, num, cik1)
-            with col_b:
-                st.markdown(f"##### 🅑 {name2}")
-                if in2:
-                    st.session_state["company_name"] = name2
-                    render_section(sec, data2, num, cik2)
-            st.divider()
-            num += 1
+    with st.spinner(f"Fetching data for **{name1}**…"):
+        data1 = load_all_data(name1, type1, cik1, secs1)
+    st.subheader(name1)
+    render_company(name1, type1, cik1, secs1, data1)
 
 
 if __name__ == "__main__":
