@@ -97,8 +97,8 @@ def plotly_config():
         plot_bgcolor="white", paper_bgcolor="white",
         font=dict(family="Inter", color="#475569", size=11),
         title_font=dict(color="#1e293b", size=13),
-        xaxis=dict(gridcolor="#f1f5f9", linecolor="#e2e8f0"),
-        yaxis=dict(gridcolor="#f1f5f9", linecolor="#e2e8f0"),
+        xaxis=dict(title=None, gridcolor="#f1f5f9", linecolor="#e2e8f0"),
+        yaxis=dict(title=None, gridcolor="#f1f5f9", linecolor="#e2e8f0"),
         margin=dict(t=40, b=20, l=10, r=10),
     )
 
@@ -242,7 +242,7 @@ def render_trials(data, num):
             orientation="h", text=list(statuses.values()),
             color_discrete_sequence=["#3b82f6"])
         fig.update_traces(textposition="outside")
-        fig.update_layout(**plotly_config(), height=180, showlegend=False, xaxis=dict(title=None, gridcolor="#f1f5f9", linecolor="#e2e8f0"), yaxis=dict(title=None, gridcolor="#f1f5f9", linecolor="#e2e8f0"))
+        fig.update_layout(**plotly_config(), height=180, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
     df = pd.DataFrame([{"NCT ID": i["nct_id"], "Title": i["title"][:70],
         "Phase": i["phase"], "Status": i["status"], "Enrollment": i["enrollment"],
