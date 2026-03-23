@@ -202,8 +202,10 @@ def render_recalls(data, num):
     d     = data.get("recalls", {})
     items = d.get("items", [])
     if not items:
-        empty_state("No recall records found for this company name.",
-            "https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfRES/res.cfm",
+        name = st.session_state.get("company_name", "")
+        encoded = urllib.parse.quote(name)
+        empty_state("No recall records found. FDA may store the company name differently.",
+            f"https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfRES/res.cfm?start_search=1&firmlegalnam={encoded}",
             "Search FDA Recall Database manually")
         return
     classes = {}

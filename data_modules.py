@@ -159,9 +159,11 @@ def fetch_maude(company_name: str) -> dict:
 # ── FDA Recalls ───────────────────────────────────────────────────────────────
 
 def fetch_recalls(company_name: str) -> dict:
-    # recalling_firm is a tokenized field — first word gives best results
+    # Use device/enforcement.json — this is the correct openFDA endpoint for device recalls.
+    # device/recall.json covers a different (narrower) dataset.
+    # recalling_firm is tokenized so first word works best.
     d = _fda_search(
-        f"{BASE}/device/recall.json",
+        f"{BASE}/device/enforcement.json",
         "recalling_firm",
         company_name,
         {"limit": 20, "sort": "recall_initiation_date:desc"},
@@ -170,7 +172,7 @@ def fetch_recalls(company_name: str) -> dict:
     for r in d.get("results", []):
         items.append({
             "date":    r.get("recall_initiation_date", "—"),
-            "class":   r.get("res_text", "—"),
+            "class":   r.get("classification", "—"),
             "product": r.get("product_description", "—")[:80],
             "reason":  r.get("reason_for_recall", "—")[:120],
             "status":  r.get("status", "—"),
