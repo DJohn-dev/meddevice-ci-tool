@@ -225,135 +225,188 @@ def fetch_trials(company_name: str) -> dict:
 
 # ── CMS Open Payments ─────────────────────────────────────────────────────────
 #
-# CONFIRMED WORKING (tested 2026-03-23):
-#   Base:    https://openpaymentsdata.cms.gov/api/1/datastore/query/{dataset_id}/0
-#   2023 ID: fb3a65aa-c901-4a38-a813-b04b00dfa2a9  (14.7M records)
-#   Filter:  filter[applicable_manufacturer_or_applicable_gpo_making_payment_name]=
-#            "Intuitive Surgical, Inc."
-#   Fields:  all lowercase, e.g. applicable_manufacturer_or_applicable_gpo_making_payment_name
-#            covered_recipient_first_name, covered_recipient_last_name
-#            total_amount_of_payment_usdollars, nature_of_payment_or_transfer_of_value
-#            recipient_state, covered_recipient_specialty_1, program_year
+# CONFIRMED WORKING APPROACH (tested 2026-03-23):
+# The DKAN /api/1/datastore/query endpoint accepts filter params but ignores them.
+# The only reliable approach: download the pre-built summary CSV files from
+# download.cms.gov, which are already aggregated by company.
 #
-# The filter key must be lowercase even though the URL example showed Title_Case.
+# Summary CSV: "payments grouped by reporting entities and nature of payments"
+# Fields: amgpo_id, amgpo_name, nature_of_payment_type_code, number_of_transaction, total_amount
+# Size: ~6,484 rows total (all companies) — very small, fast to download
+#
+# Nature of payment type codes (from CMS data dictionary):
+PAYMENT_TYPE_CODES = {
+    "1":  "Consulting Fees",
+    "2":  "Compensation for Services Other Than Consulting",
+    "3":  "Honoraria",
+    "4":  "Gift",
+    "5":  "Entertainment",
+    "6":  "Food and Beverage",
+    "7":  "Travel and Lodging",
+    "8":  "Education",
+    "9":  "Research",
+    "10": "Charitable Contribution",
+    "11": "Royalty or License",
+    "12": "Current or Prospective Ownership or Investment Interest",
+    "13": "Compensation for Serving as Faculty or as a Speaker for a Medical Education Program",
+    "14": "Grant",
+    "15": "Space Rental or Facility Fees",
+    "16": "Services: Other",
+    "17": "Medical Device Loan",
+    "18": "Non-Research Related Items",
+}
 
-OPAY_BASE = "https://openpaymentsdata.cms.gov/api/1/datastore/query"
-OPAY_DATASETS = [
-    "fb3a65aa-c901-4a38-a813-b04b00dfa2a9",  # 2023 general payments — confirmed working
-]
-OPAY_NAME_FIELD = "applicable_manufacturer_or_applicable_gpo_making_payment_name"
-OPAY_ID_FIELD   = "applicable_manufacturer_or_applicable_gpo_making_payment_id"
+# Dataset identifiers from the metastore catalog (confirmed via /api/1/metastore/schemas/dataset/items)
+SUMMARY_DATASETS = {
+    2024: {
+        "dataset_id": "d7e3f320-9ddc-4a5b-8aaf-45048cbd7386",
+        "csv_url": "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_SMRY_BY_AMGPO_BY_NTR_OF_PYMT_PGYR2024_P01232026_01102026.csv",
+    },
+    2023: {
+        "dataset_id": "72008dab-0953-4226-a4cd-9f1872e8170d",
+        "csv_url": "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_SMRY_BY_AMGPO_BY_NTR_OF_PYMT_PGYR2023_P01232026_01102026.csv",
+    },
+    2022: {
+        "dataset_id": "cedcd327-4e5d-43f9-8eb1-c11850fa7c66",
+        "csv_url": "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_SMRY_BY_AMGPO_BY_NTR_OF_PYMT_PGYR2022_P01232026_01102026.csv",
+    },
+}
 
 
-def _opay_query(dataset_id: str, filters: dict, limit: int = 500, offset: int = 0) -> dict:
-    """Query the Open Payments DKAN datastore with confirmed working syntax."""
-    params = {
-        "limit":          limit,
-        "offset":         offset,
-        "count":          "true",
-        "results":        "true",
-        "keys":           "true",
-        "format":         "json",
-        "sort":           "total_amount_of_payment_usdollars",
-        "sort-order":     "desc",
-    }
-    for k, v in filters.items():
-        params[f"filter[{k}]"] = v
+def _fetch_summary_csv(csv_url: str, company_id: str) -> list:
+    """
+    Download the summary CSV and filter rows for the given company ID.
+    Returns list of dicts with keys: nature_of_payment_type_code, total_amount, number_of_transaction
+    """
+    import io, csv
     try:
-        r = requests.get(
-            f"{OPAY_BASE}/{dataset_id}/0",
-            params=params,
-            timeout=TIMEOUT,
-        )
+        r = requests.get(csv_url, timeout=30, stream=True)
         r.raise_for_status()
-        return r.json()
+        # Read the CSV content
+        content = r.content.decode("utf-8-sig")  # handle BOM
+        reader = csv.DictReader(io.StringIO(content))
+        rows = []
+        for row in reader:
+            # Field names vary slightly — try both cases
+            rid = (row.get("Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID") or
+                   row.get("amgpo_id") or row.get("AMGPO_ID") or "").strip()
+            if rid == company_id:
+                rows.append(row)
+        return rows
     except Exception as e:
-        return {"error": str(e), "results": [], "count": 0}
+        return []
+
+
+def _lookup_company_id(company_name: str) -> tuple:
+    """
+    Look up numeric company ID from the reporting entity profile CSV.
+    Returns (company_id, resolved_name) or (None, company_name)
+    """
+    import io, csv
+    profile_url = "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_RPTG_ORG_PRFL_SRCH_P01232026_01102026.csv"
+    try:
+        r = requests.get(profile_url, timeout=30)
+        r.raise_for_status()
+        content = r.content.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(content))
+        name_lower = company_name.lower().strip()
+        best_match = None
+        for row in reader:
+            # Try all name fields
+            for field in ["Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_Name",
+                          "amgpo_name", "Company_Name", "Name"]:
+                stored = row.get(field, "").strip()
+                if stored.lower() == name_lower:
+                    cid = (row.get("Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID") or
+                           row.get("amgpo_id") or row.get("ID") or "").strip()
+                    return cid, stored
+                # Partial match fallback
+                if name_lower in stored.lower() and best_match is None:
+                    best_match = row
+        if best_match:
+            for field in ["Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_Name",
+                          "amgpo_name", "Company_Name", "Name"]:
+                stored = best_match.get(field, "").strip()
+                if stored:
+                    cid = (best_match.get("Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID") or
+                           best_match.get("amgpo_id") or "").strip()
+                    return cid, stored
+    except Exception:
+        pass
+    return None, company_name
 
 
 def fetch_payments(company_name: str) -> dict:
     """
-    Fetch Open Payments data using the confirmed working DKAN endpoint.
-    Dataset: fb3a65aa-c901-4a38-a813-b04b00dfa2a9 (2023 general payments)
-    Filter field: applicable_manufacturer_or_applicable_gpo_making_payment_name (lowercase)
+    Fetch Open Payments summary data by downloading pre-built CMS summary CSVs.
+    These are small files (~6K rows) aggregated by company and payment type.
+    Uses the company numeric ID (amgpo_id) for reliable filtering.
+
+    If no CIK provided, looks up company ID from the reporting entity profile CSV.
     """
-    all_rows  = []
-    company_id = ""
+    import io, csv
 
-    for ds_id in OPAY_DATASETS:
-        d = _opay_query(ds_id, {OPAY_NAME_FIELD: company_name}, limit=500)
+    # Step 1: resolve company ID
+    # Intuitive Surgical's known ID is 100000005384 — but we look it up dynamically
+    company_id, resolved_name = _lookup_company_id(company_name)
 
-        if d.get("error"):
-            continue
-
-        rows = d.get("results", [])
-        if not rows:
-            # Company name not found — return clear error
-            return {
-                "error": f"'{company_name}' not found in Open Payments. "
-                         "The name must match exactly as registered with CMS. "
-                         f"Check openpaymentsdata.cms.gov to confirm the legal name.",
-                "resolved_name": company_name,
-                "company_id": None,
-            }
-
-        # Grab company ID from first row
-        if not company_id and rows:
-            company_id = rows[0].get(OPAY_ID_FIELD, "")
-
-        for row in rows:
-            row["_ds_id"] = ds_id
-        all_rows.extend(rows)
-
-    if not all_rows:
+    if not company_id:
         return {
-            "error": f"No payment records found for '{company_name}'.",
+            "error": (f"Could not find '{company_name}' in Open Payments company registry. "
+                      "Check the exact legal name at openpaymentsdata.cms.gov."),
             "resolved_name": company_name,
-            "company_id": None,
         }
 
-    # Aggregate
+    # Step 2: fetch summary rows for each year
+    by_year  = {}
+    by_type  = {}
     total_paid = 0.0
-    by_year    = defaultdict(float)
-    by_type    = defaultdict(float)
-    by_state   = defaultdict(float)
-    physicians = defaultdict(lambda: {"total": 0.0, "count": 0, "specialty": "", "state": ""})
+    record_count = 0
 
-    for p in all_rows:
-        amt   = float(p.get("total_amount_of_payment_usdollars") or 0)
-        total_paid += amt
+    for year, info in SUMMARY_DATASETS.items():
+        rows = _fetch_summary_csv(info["csv_url"], company_id)
+        year_total = 0.0
+        for row in rows:
+            # Field names vary by file version
+            amt = float(
+                row.get("Total_Amount") or row.get("total_amount") or
+                row.get("TOTAL_AMOUNT") or 0
+            )
+            code = (row.get("Nature_Of_Payment_Type_Code") or
+                    row.get("nature_of_payment_type_code") or
+                    row.get("NATURE_OF_PAYMENT_TYPE_CODE") or "").strip()
+            n = int(
+                row.get("Number_of_Transaction") or row.get("number_of_transaction") or
+                row.get("NUMBER_OF_TRANSACTION") or 0
+            )
+            year_total   += amt
+            total_paid   += amt
+            record_count += n
+            ptype = PAYMENT_TYPE_CODES.get(code, f"Type {code}")
+            by_type[ptype] = by_type.get(ptype, 0.0) + amt
 
-        year  = str(p.get("program_year") or "Unknown")
-        by_year[year] += amt
+        if year_total > 0:
+            by_year[str(year)] = year_total
 
-        ptype = p.get("nature_of_payment_or_transfer_of_value") or "Other"
-        by_type[ptype] += amt
-
-        state = p.get("recipient_state") or "Unknown"
-        by_state[state] += amt
-
-        first = p.get("covered_recipient_first_name") or ""
-        last  = p.get("covered_recipient_last_name")  or ""
-        name  = f"{first} {last}".strip()
-        if len(name) > 2:
-            spec  = p.get("covered_recipient_specialty_1") or ""
-            physicians[name]["total"]   += amt
-            physicians[name]["count"]   += 1
-            if not physicians[name]["specialty"] and spec:
-                physicians[name]["specialty"] = spec
-            if not physicians[name]["state"] and state != "Unknown":
-                physicians[name]["state"] = state
+    if not by_year:
+        return {
+            "error": (f"Found company ID {company_id} but no payment records in summary files. "
+                      "The company may not have reportable payments in 2022-2024."),
+            "resolved_name": resolved_name,
+            "company_id": company_id,
+        }
 
     return {
-        "resolved_name": company_name,
-        "company_id":    company_id,
-        "total_paid":    total_paid,
-        "record_count":  len(all_rows),
-        "by_year":       dict(sorted(by_year.items())),
-        "by_type":       dict(sorted(by_type.items(), key=lambda x: x[1], reverse=True)),
-        "by_state":      dict(sorted(by_state.items(), key=lambda x: x[1], reverse=True)),
-        "top_kols":      sorted(physicians.items(), key=lambda x: x[1]["total"], reverse=True)[:20],
-        "cms_url":       f"https://openpaymentsdata.cms.gov/company/{company_id}" if company_id else "",
+        "resolved_name":  resolved_name,
+        "company_id":     company_id,
+        "total_paid":     total_paid,
+        "record_count":   record_count,
+        "by_year":        dict(sorted(by_year.items())),
+        "by_type":        dict(sorted(by_type.items(), key=lambda x: x[1], reverse=True)),
+        "by_state":       {},   # not available in summary files
+        "top_kols":       [],   # not available in summary files
+        "cms_url":        f"https://openpaymentsdata.cms.gov/company/{company_id}",
+        "data_note":      "Summary data only (payment totals by type/year). Individual KOL records require bulk download.",
     }
 
 

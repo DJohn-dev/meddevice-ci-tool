@@ -303,11 +303,15 @@ def render_payments(data, num):
             fig.update_layout(geo=dict(scope="usa", showlakes=True, lakecolor="white"),
                 **plotly_config(), title="KOL Payments by State", height=420)
             st.plotly_chart(fig, use_container_width=True)
-        df_s = pd.DataFrame([{"State": k, "Total Paid": fmt_usd(v), "_r": v}
-            for k,v in by_state.items() if k and k != "Unknown"]
-            ).sort_values("_r", ascending=False).drop(columns="_r").head(20)
-        if not df_s.empty:
-            st.dataframe(df_s, use_container_width=True, hide_index=True)
+        if not us_states and not by_state:
+            st.info("Geographic breakdown requires individual payment records. "
+                    "View the full breakdown at the CMS Open Payments link above.")
+        else:
+            df_s = pd.DataFrame([{"State": k, "Total Paid": fmt_usd(v), "_r": v}
+                for k,v in by_state.items() if k and k != "Unknown"]
+                ).sort_values("_r", ascending=False).drop(columns="_r").head(20)
+            if not df_s.empty:
+                st.dataframe(df_s, use_container_width=True, hide_index=True)
 
     with tab4:
         if top_kols:
@@ -323,6 +327,17 @@ def render_payments(data, num):
             fig.update_layout(**plotly_config(), title="Top 15 KOL Recipients",
                 height=480, xaxis_title="Total Paid (USD)")
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            name = st.session_state.get("company_name", "")
+            cms_url = d.get("cms_url", "")
+            st.info("Individual KOL records are not available in the summary dataset.")
+            if cms_url:
+                st.markdown(f"[View individual physician payments on CMS Open Payments →]({cms_url})")
+
+    # Data note (summary files don't include individual KOL records)
+    note = d.get("data_note")
+    if note:
+        st.info(f"ℹ️ {note}")
 
     st.text_area("KOL Strategy — Analyst Note",
         placeholder="Cross-reference top KOLs with ClinicalTrials.gov PIs. Geographic concentration? Specialty alignment? YoY trend?",
