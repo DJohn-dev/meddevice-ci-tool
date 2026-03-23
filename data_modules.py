@@ -288,8 +288,9 @@ def _fetch_summary_csv(csv_url: str, company_id: str) -> list:
         rows = []
         for row in reader:
             # Field names vary slightly — try both cases
-            rid = (row.get("Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID") or
-                   row.get("amgpo_id") or row.get("AMGPO_ID") or "").strip()
+            rid = (row.get("AMGPO_Making_Payment_ID") or
+                   row.get("amgpo_id") or
+                   row.get("Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID") or "").strip()
             if rid == company_id:
                 rows.append(row)
         return rows
@@ -300,6 +301,10 @@ def _fetch_summary_csv(csv_url: str, company_id: str) -> list:
 def _lookup_company_id(company_name: str) -> tuple:
     """
     Look up numeric company ID from the reporting entity profile CSV.
+    Confirmed field names (from debug 2026-03-23):
+      AMGPO_Making_Payment_ID, AMGPO_Making_Payment_Name
+    Stored names are ALL CAPS so we do case-insensitive matching.
+    Also checks alternate name fields (1-5).
     Returns (company_id, resolved_name) or (None, company_name)
     """
     import io, csv
@@ -311,49 +316,56 @@ def _lookup_company_id(company_name: str) -> tuple:
         reader = csv.DictReader(io.StringIO(content))
         name_lower = company_name.lower().strip()
         best_match = None
+
+        name_fields = [
+            "AMGPO_Making_Payment_Name",
+            "AMGPO_Making_Payment_Alternate_Name1",
+            "AMGPO_Making_Payment_Alternate_Name2",
+            "AMGPO_Making_Payment_Alternate_Name3",
+            "AMGPO_Making_Payment_Alternate_Name4",
+            "AMGPO_Making_Payment_Alternate_Name5",
+        ]
+
         for row in reader:
-            # Try all name fields
-            for field in ["Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_Name",
-                          "amgpo_name", "Company_Name", "Name"]:
+            cid = row.get("AMGPO_Making_Payment_ID", "").strip()
+            for field in name_fields:
                 stored = row.get(field, "").strip()
+                if not stored:
+                    continue
                 if stored.lower() == name_lower:
-                    cid = (row.get("Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID") or
-                           row.get("amgpo_id") or row.get("ID") or "").strip()
+                    # Exact match (case-insensitive)
                     return cid, stored
-                # Partial match fallback
                 if name_lower in stored.lower() and best_match is None:
-                    best_match = row
+                    best_match = (cid, stored)
+
         if best_match:
-            for field in ["Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_Name",
-                          "amgpo_name", "Company_Name", "Name"]:
-                stored = best_match.get(field, "").strip()
-                if stored:
-                    cid = (best_match.get("Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID") or
-                           best_match.get("amgpo_id") or "").strip()
-                    return cid, stored
+            return best_match
+
     except Exception:
         pass
     return None, company_name
 
 
 def fetch_payments(company_name: str) -> dict:
-    import io, csv, requests
-    profile_url = "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_RPTG_ORG_PRFL_SRCH_P01232026_01102026.csv"
-    r = requests.get(profile_url, timeout=30)
-    content = r.content.decode("utf-8-sig")
-    reader = csv.DictReader(io.StringIO(content))
-    rows = list(reader)
-    first = rows[0] if rows else {}
-    # Find any row containing "Intuitive"
-    intuitive = [row for row in rows if any("intuitive" in str(v).lower() for v in row.values())]
-    return {
-        "error": "DEBUG",
-        "status": r.status_code,
-        "total_rows": len(rows),
-        "field_names": list(first.keys()),
-        "first_row": first,
-        "intuitive_rows": intuitive[:3],
-    }
+    """
+    Fetch Open Payments summary data by downloading pre-built CMS summary CSVs.
+    These are small files (~6K rows) aggregated by company and payment type.
+    Uses the company numeric ID (amgpo_id) for reliable filtering.
+
+    If no CIK provided, looks up company ID from the reporting entity profile CSV.
+    """
+    import io, csv
+
+    # Step 1: resolve company ID
+    # Intuitive Surgical's known ID is 100000005384 — but we look it up dynamically
+    company_id, resolved_name = _lookup_company_id(company_name)
+
+    if not company_id:
+        return {
+            "error": (f"Could not find '{company_name}' in Open Payments company registry. "
+                      "Check the exact legal name at openpaymentsdata.cms.gov."),
+            "resolved_name": company_name,
+        }
 
     # Step 2: fetch summary rows for each year
     by_year  = {}
