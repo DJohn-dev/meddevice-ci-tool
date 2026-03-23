@@ -1,4 +1,4 @@
-# Medical Device Competitive Intelligence Tool
+# Medical Device Competitive Intelligence Search Tool
 
 A Streamlit app for medical device market intelligence. Pulls live data from six public APIs entirely server-side — no browser CORS restrictions, no API keys required.
 
@@ -87,6 +87,4 @@ Streamlit Cloud installs `requirements.txt` automatically. Auto-deploys on every
 
 ---
 
-## Portfolio Notes
 
-This project demonstrates server-side API orchestration across six public health data sources, Python data aggregation and transformation, Streamlit UI construction with Plotly visualizations, and practical medical device market intelligence workflows.
