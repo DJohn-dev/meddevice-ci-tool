@@ -1,6 +1,6 @@
 """
 Medical Device CI Tool — Data Modules
-All API calls are server-side (no CORS). Uses requests library.
+All API calls are server-side via Python requests (no CORS restrictions).
 """
 import requests
 from collections import defaultdict
@@ -9,7 +9,7 @@ TIMEOUT = 15
 BASE = "https://api.fda.gov"
 
 
-# ── Shared helper ─────────────────────────────────────────────────────────────
+# ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _get(url, params):
     try:
@@ -20,26 +20,17 @@ def _get(url, params):
         return {"error": str(e)}
 
 
-def _fda_name_variants(company_name: str) -> list[str]:
+def _fda_search(url, field, company_name, extra_params):
     """
-    OpenFDA stores names in unpredictable formats (ALL CAPS, with/without Inc., etc.)
-    Try progressively looser queries: quoted exact → first word only → first two words.
+    Try progressively looser name queries against OpenFDA.
+    FDA stores names inconsistently (ALL CAPS, truncated, no punctuation).
+    Strategy: first word only is most reliable for tokenized fields.
     """
     parts = company_name.replace(",", "").replace(".", "").split()
-    variants = [
-        f'"{company_name}"',          # exact quoted
-        company_name,                  # unquoted (partial match)
-        " ".join(parts[:2]) if len(parts) >= 2 else parts[0],  # first two words
-        parts[0],                      # first word only
-    ]
-    # deduplicate while preserving order
-    seen = set()
-    return [v for v in variants if not (v in seen or seen.add(v))]
+    first = parts[0]
+    two   = " ".join(parts[:2]) if len(parts) >= 2 else first
 
-
-def _fda_query_with_fallback(url: str, field: str, company_name: str, extra_params: dict) -> dict:
-    """Try multiple name variants until we get results."""
-    for variant in _fda_name_variants(company_name):
+    for variant in [first, two, company_name]:
         params = {**extra_params, "search": f"{field}:{variant}"}
         d = _get(url, params)
         if not d.get("error") and d.get("results"):
@@ -50,15 +41,14 @@ def _fda_query_with_fallback(url: str, field: str, company_name: str, extra_para
 # ── FDA Registration / FEI ────────────────────────────────────────────────────
 
 def fetch_fei(company_name: str) -> dict:
-    d = _fda_query_with_fallback(
+    d = _fda_search(
         f"{BASE}/device/registrationlisting.json",
         "registration.name",
         company_name,
         {"limit": 10},
     )
-    results = d.get("results", [])
     establishments, products = [], []
-    for r in results:
+    for r in d.get("results", []):
         reg = r.get("registration", {})
         establishments.append({
             "fei":    reg.get("fei_number", "—"),
@@ -69,23 +59,24 @@ def fetch_fei(company_name: str) -> dict:
         for p in r.get("products", []):
             openfda = p.get("openfda", {})
             cls = openfda.get("device_class", [])
+            names = openfda.get("device_name", [])
             products.append({
                 "code":  p.get("product_code", "—"),
-                "name":  openfda.get("device_name", ["—"])[0] if openfda.get("device_name") else p.get("product_code", "—"),
+                "name":  names[0] if names else p.get("product_code", "—"),
                 "class": cls[0] if cls else "—",
             })
     return {
         "total":          d.get("meta", {}).get("results", {}).get("total", 0),
         "establishments": establishments[:8],
         "products":       products[:20],
-        "error":          d.get("error") if not results else None,
+        "error":          d.get("error") if not establishments else None,
     }
 
 
 # ── FDA 510(k) ────────────────────────────────────────────────────────────────
 
 def fetch_510k(company_name: str) -> dict:
-    d = _fda_query_with_fallback(
+    d = _fda_search(
         f"{BASE}/device/510k.json",
         "applicant",
         company_name,
@@ -112,7 +103,7 @@ def fetch_510k(company_name: str) -> dict:
 # ── FDA PMA ───────────────────────────────────────────────────────────────────
 
 def fetch_pma(company_name: str) -> dict:
-    d = _fda_query_with_fallback(
+    d = _fda_search(
         f"{BASE}/device/pma.json",
         "applicant",
         company_name,
@@ -134,15 +125,15 @@ def fetch_pma(company_name: str) -> dict:
 # ── FDA MAUDE ─────────────────────────────────────────────────────────────────
 
 def fetch_maude(company_name: str) -> dict:
-    # MAUDE uses manufacturer_d_name (device manufacturer) — try both fields
-    d = _fda_query_with_fallback(
+    # Try manufacturer_d_name first, then device.manufacturer_d_name
+    d = _fda_search(
         f"{BASE}/device/event.json",
         "manufacturer_d_name",
         company_name,
         {"limit": 25, "sort": "date_received:desc"},
     )
     if not d.get("results"):
-        d = _fda_query_with_fallback(
+        d = _fda_search(
             f"{BASE}/device/event.json",
             "device.manufacturer_d_name",
             company_name,
@@ -168,27 +159,13 @@ def fetch_maude(company_name: str) -> dict:
 # ── FDA Recalls ───────────────────────────────────────────────────────────────
 
 def fetch_recalls(company_name: str) -> dict:
-    # openFDA recalling_firm is tokenized — search first meaningful word for best results
-    # e.g. "Intuitive Surgical, Inc." -> search "Intuitive"
-    first_word = company_name.replace(",", "").replace(".", "").split()[0]
-    
-    # Try progressively: first word, first two words, full name
-    search_terms = [first_word]
-    parts = company_name.replace(",", "").replace(".", "").split()
-    if len(parts) >= 2:
-        search_terms.append(f"{parts[0]} {parts[1]}")
-    search_terms.append(company_name)
-    
-    d = {"results": [], "meta": {}}
-    for term in search_terms:
-        d = _get(f"{BASE}/device/recall.json", {
-            "search": f"recalling_firm:{term}",
-            "limit": 20,
-            "sort": "recall_initiation_date:desc",
-        })
-        if not d.get("error") and d.get("results"):
-            break
-    
+    # recalling_firm is a tokenized field — first word gives best results
+    d = _fda_search(
+        f"{BASE}/device/recall.json",
+        "recalling_firm",
+        company_name,
+        {"limit": 20, "sort": "recall_initiation_date:desc"},
+    )
     items = []
     for r in d.get("results", []):
         items.append({
@@ -248,61 +225,122 @@ def fetch_trials(company_name: str) -> dict:
 
 # ── CMS Open Payments ─────────────────────────────────────────────────────────
 #
-# openpaymentsdata.cms.gov/resource/* returns 404 — wrong domain for Socrata.
-# The confirmed working Socrata endpoint is data.cms.gov/resource/{id}.json
-# Dataset IDs on data.cms.gov (general payments):
-#   2023: 9bsv-3ct4  (confirmed in prior research, Socrata on data.cms.gov)
-#   Try newer IDs progressively
+# Confirmed working endpoint: data.cms.gov (NOT openpaymentsdata.cms.gov)
+# data.cms.gov hosts the Socrata/SODA API — standard $where, $limit, $order params
+# Dataset IDs (general payments):
+#   9bsv-3ct4 = confirmed Socrata dataset on data.cms.gov
 #
-# Field name confirmed: applicable_manufacturer_or_applicable_gpo_making_payment_name
-
-SODA_BASE = "https://data.cms.gov/resource"
-SODA_DATASETS = ["9bsv-3ct4", "w8ex-3swy", "7657-5cpe"]  # 2023, 2022, 2021
-
-
-def _soda_get(dataset_id: str, params: dict) -> list:
-    """Query a Socrata/SODA endpoint."""
-    try:
-        r = requests.get(
-            f"{SODA_BASE}/{dataset_id}.json",
-            params=params,
-            timeout=TIMEOUT,
-        )
-        r.raise_for_status()
-        d = r.json()
-        return d if isinstance(d, list) else []
-    except Exception:
-        return []
-
+# Field name: applicable_manufacturer_or_applicable_gpo_making_payment_name
 
 def fetch_payments(company_name: str) -> dict:
-    # DEBUG: test data.cms.gov Socrata endpoint
-    r1 = requests.get(
-        "https://data.cms.gov/resource/9bsv-3ct4.json",
-        params={"$limit": "2"},
-        timeout=20
-    )
-    r2 = requests.get(
-        "https://data.cms.gov/resource/9bsv-3ct4.json",
-        params={
-            "$where": "applicable_manufacturer_or_applicable_gpo_making_payment_name='Intuitive Surgical, Inc.'",
-            "$limit": "2",
-        },
-        timeout=20
-    )
-    sample = r1.json() if r1.ok else []
+    base = "https://data.cms.gov/resource"
+    # Try multiple dataset IDs — CMS publishes a new one each June
+    datasets = ["9bsv-3ct4", "w8ex-3swy", "7657-5cpe"]
+    name_field = "applicable_manufacturer_or_applicable_gpo_making_payment_name"
+
+    # Step 1: find exact stored name via LIKE search
+    resolved_name = company_name
+    company_id    = ""
+    rows_found    = []
+
+    for ds_id in datasets:
+        try:
+            r = requests.get(
+                f"{base}/{ds_id}.json",
+                params={
+                    "$where":  f"upper({name_field}) LIKE upper('%{company_name.replace(chr(39), chr(39)+chr(39))}%')",
+                    "$select": f"{name_field},applicable_manufacturer_or_applicable_gpo_making_payment_id",
+                    "$limit":  "5",
+                },
+                timeout=TIMEOUT,
+            )
+            if r.ok and r.json():
+                row = r.json()[0]
+                resolved_name = row.get(name_field, company_name)
+                company_id    = row.get("applicable_manufacturer_or_applicable_gpo_making_payment_id", "")
+                rows_found    = r.json()
+                break
+        except Exception:
+            continue
+
+    if not resolved_name or resolved_name == company_name and not rows_found:
+        return {
+            "error": f"'{company_name}' not found in Open Payments. "
+                     "Check the exact legal name at openpaymentsdata.cms.gov.",
+            "resolved_name": company_name,
+        }
+
+    # Step 2: pull up to 500 payment records per dataset
+    all_rows = []
+    safe_name = resolved_name.replace("'", "''")
+
+    for ds_id in datasets:
+        try:
+            r = requests.get(
+                f"{base}/{ds_id}.json",
+                params={
+                    "$where": f"{name_field}='{safe_name}'",
+                    "$order": "total_amount_of_payment_usdollars DESC",
+                    "$limit": "500",
+                },
+                timeout=TIMEOUT,
+            )
+            if r.ok and r.json():
+                year_tag = ds_id  # used for fallback year label
+                for row in r.json():
+                    row["_ds"] = ds_id
+                all_rows.extend(r.json())
+        except Exception:
+            continue
+
+    if not all_rows:
+        return {
+            "error": f"Found '{resolved_name}' but no payment records returned.",
+            "resolved_name": resolved_name,
+        }
+
+    # Step 3: aggregate
+    total_paid = 0.0
+    by_year    = defaultdict(float)
+    by_type    = defaultdict(float)
+    by_state   = defaultdict(float)
+    physicians = defaultdict(lambda: {"total": 0.0, "count": 0, "specialty": "", "state": ""})
+
+    for p in all_rows:
+        amt   = float(p.get("total_amount_of_payment_usdollars") or 0)
+        total_paid += amt
+        year  = str(p.get("program_year") or "Unknown")
+        by_year[year] += amt
+        ptype = p.get("nature_of_payment_or_transfer_of_value") or "Other"
+        by_type[ptype] += amt
+        state = p.get("recipient_state") or "Unknown"
+        by_state[state] += amt
+        first = p.get("covered_recipient_first_name") or p.get("physician_first_name") or ""
+        last  = p.get("covered_recipient_last_name")  or p.get("physician_last_name")  or ""
+        name  = f"{first} {last}".strip()
+        if len(name) > 2:
+            spec  = p.get("covered_recipient_specialty_1") or p.get("physician_specialty") or ""
+            physicians[name]["total"]   += amt
+            physicians[name]["count"]   += 1
+            if not physicians[name]["specialty"] and spec:
+                physicians[name]["specialty"] = spec
+            if not physicians[name]["state"] and state != "Unknown":
+                physicians[name]["state"] = state
+
     return {
-        "error": "DEBUG MODE",
-        "domain_tested": "data.cms.gov",
-        "test1_status": r1.status_code,
-        "test1_fields": list(sample[0].keys()) if sample else "no rows",
-        "test1_sample_name": sample[0].get(
-            "applicable_manufacturer_or_applicable_gpo_making_payment_name", "FIELD NOT FOUND"
-        ) if sample else "n/a",
-        "test2_status": r2.status_code,
-        "test2_count": len(r2.json()) if r2.ok else "error",
-        "test2_body": r2.text[:300],
+        "resolved_name": resolved_name,
+        "company_id":    company_id,
+        "total_paid":    total_paid,
+        "record_count":  len(all_rows),
+        "by_year":       dict(sorted(by_year.items())),
+        "by_type":       dict(sorted(by_type.items(), key=lambda x: x[1], reverse=True)),
+        "by_state":      dict(sorted(by_state.items(), key=lambda x: x[1], reverse=True)),
+        "top_kols":      sorted(physicians.items(), key=lambda x: x[1]["total"], reverse=True)[:20],
+        "cms_url":       f"https://openpaymentsdata.cms.gov/company/{company_id}" if company_id else "",
     }
+
+
+# ── SEC EDGAR ─────────────────────────────────────────────────────────────────
 
 def fetch_sec(cik: str) -> dict:
     cik_clean  = str(cik).strip().lstrip("0")
@@ -310,7 +348,7 @@ def fetch_sec(cik: str) -> dict:
     try:
         r = requests.get(
             f"https://data.sec.gov/submissions/CIK{cik_padded}.json",
-            headers={"User-Agent": "MedDevice CI Tool analyst@example.com"},
+            headers={"User-Agent": "MedDevice CI Tool research@example.com"},
             timeout=TIMEOUT,
         )
         r.raise_for_status()
@@ -318,8 +356,8 @@ def fetch_sec(cik: str) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
-    entity_name = d.get("name", "Unknown")
-    recent      = d.get("filings", {}).get("recent", {})
+    entity_name  = d.get("name", "Unknown")
+    recent       = d.get("filings", {}).get("recent", {})
     forms        = recent.get("form", [])
     dates        = recent.get("filingDate", [])
     accessions   = recent.get("accessionNumber", [])
@@ -408,8 +446,7 @@ def fetch_nih(company_name: str) -> dict:
             timeout=TIMEOUT,
         )
         r.raise_for_status()
-        d     = r.json()
-        items = d.get("results", [])
+        items = r.json().get("results", [])
         return {"items": items, "total": sum(float(i.get("award_amount") or 0) for i in items)}
     except Exception as e:
         return {"items": [], "total": 0, "error": str(e)}
