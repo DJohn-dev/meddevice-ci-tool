@@ -225,81 +225,94 @@ def fetch_trials(company_name: str) -> dict:
 
 # ── CMS Open Payments ─────────────────────────────────────────────────────────
 #
-# Confirmed working endpoint: data.cms.gov (NOT openpaymentsdata.cms.gov)
-# data.cms.gov hosts the Socrata/SODA API — standard $where, $limit, $order params
-# Dataset IDs (general payments):
-#   9bsv-3ct4 = confirmed Socrata dataset on data.cms.gov
+# CONFIRMED WORKING (tested 2026-03-23):
+#   Base:    https://openpaymentsdata.cms.gov/api/1/datastore/query/{dataset_id}/0
+#   2023 ID: fb3a65aa-c901-4a38-a813-b04b00dfa2a9  (14.7M records)
+#   Filter:  filter[applicable_manufacturer_or_applicable_gpo_making_payment_name]=
+#            "Intuitive Surgical, Inc."
+#   Fields:  all lowercase, e.g. applicable_manufacturer_or_applicable_gpo_making_payment_name
+#            covered_recipient_first_name, covered_recipient_last_name
+#            total_amount_of_payment_usdollars, nature_of_payment_or_transfer_of_value
+#            recipient_state, covered_recipient_specialty_1, program_year
 #
-# Field name: applicable_manufacturer_or_applicable_gpo_making_payment_name
+# The filter key must be lowercase even though the URL example showed Title_Case.
+
+OPAY_BASE = "https://openpaymentsdata.cms.gov/api/1/datastore/query"
+OPAY_DATASETS = [
+    "fb3a65aa-c901-4a38-a813-b04b00dfa2a9",  # 2023 general payments — confirmed working
+]
+OPAY_NAME_FIELD = "applicable_manufacturer_or_applicable_gpo_making_payment_name"
+OPAY_ID_FIELD   = "applicable_manufacturer_or_applicable_gpo_making_payment_id"
+
+
+def _opay_query(dataset_id: str, filters: dict, limit: int = 500, offset: int = 0) -> dict:
+    """Query the Open Payments DKAN datastore with confirmed working syntax."""
+    params = {
+        "limit":          limit,
+        "offset":         offset,
+        "count":          "true",
+        "results":        "true",
+        "keys":           "true",
+        "format":         "json",
+        "sort":           "total_amount_of_payment_usdollars",
+        "sort-order":     "desc",
+    }
+    for k, v in filters.items():
+        params[f"filter[{k}]"] = v
+    try:
+        r = requests.get(
+            f"{OPAY_BASE}/{dataset_id}/0",
+            params=params,
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": str(e), "results": [], "count": 0}
+
 
 def fetch_payments(company_name: str) -> dict:
-    base = "https://data.cms.gov/resource"
-    # Try multiple dataset IDs — CMS publishes a new one each June
-    datasets = ["9bsv-3ct4", "w8ex-3swy", "7657-5cpe"]
-    name_field = "applicable_manufacturer_or_applicable_gpo_making_payment_name"
+    """
+    Fetch Open Payments data using the confirmed working DKAN endpoint.
+    Dataset: fb3a65aa-c901-4a38-a813-b04b00dfa2a9 (2023 general payments)
+    Filter field: applicable_manufacturer_or_applicable_gpo_making_payment_name (lowercase)
+    """
+    all_rows  = []
+    company_id = ""
 
-    # Step 1: find exact stored name via LIKE search
-    resolved_name = company_name
-    company_id    = ""
-    rows_found    = []
+    for ds_id in OPAY_DATASETS:
+        d = _opay_query(ds_id, {OPAY_NAME_FIELD: company_name}, limit=500)
 
-    for ds_id in datasets:
-        try:
-            r = requests.get(
-                f"{base}/{ds_id}.json",
-                params={
-                    "$where":  f"upper({name_field}) LIKE upper('%{company_name.replace(chr(39), chr(39)+chr(39))}%')",
-                    "$select": f"{name_field},applicable_manufacturer_or_applicable_gpo_making_payment_id",
-                    "$limit":  "5",
-                },
-                timeout=TIMEOUT,
-            )
-            if r.ok and r.json():
-                row = r.json()[0]
-                resolved_name = row.get(name_field, company_name)
-                company_id    = row.get("applicable_manufacturer_or_applicable_gpo_making_payment_id", "")
-                rows_found    = r.json()
-                break
-        except Exception:
+        if d.get("error"):
             continue
 
-    if not resolved_name or resolved_name == company_name and not rows_found:
-        return {
-            "error": f"'{company_name}' not found in Open Payments. "
-                     "Check the exact legal name at openpaymentsdata.cms.gov.",
-            "resolved_name": company_name,
-        }
+        rows = d.get("results", [])
+        if not rows:
+            # Company name not found — return clear error
+            return {
+                "error": f"'{company_name}' not found in Open Payments. "
+                         "The name must match exactly as registered with CMS. "
+                         f"Check openpaymentsdata.cms.gov to confirm the legal name.",
+                "resolved_name": company_name,
+                "company_id": None,
+            }
 
-    # Step 2: pull up to 500 payment records per dataset
-    all_rows = []
-    safe_name = resolved_name.replace("'", "''")
+        # Grab company ID from first row
+        if not company_id and rows:
+            company_id = rows[0].get(OPAY_ID_FIELD, "")
 
-    for ds_id in datasets:
-        try:
-            r = requests.get(
-                f"{base}/{ds_id}.json",
-                params={
-                    "$where": f"{name_field}='{safe_name}'",
-                    "$order": "total_amount_of_payment_usdollars DESC",
-                    "$limit": "500",
-                },
-                timeout=TIMEOUT,
-            )
-            if r.ok and r.json():
-                year_tag = ds_id  # used for fallback year label
-                for row in r.json():
-                    row["_ds"] = ds_id
-                all_rows.extend(r.json())
-        except Exception:
-            continue
+        for row in rows:
+            row["_ds_id"] = ds_id
+        all_rows.extend(rows)
 
     if not all_rows:
         return {
-            "error": f"Found '{resolved_name}' but no payment records returned.",
-            "resolved_name": resolved_name,
+            "error": f"No payment records found for '{company_name}'.",
+            "resolved_name": company_name,
+            "company_id": None,
         }
 
-    # Step 3: aggregate
+    # Aggregate
     total_paid = 0.0
     by_year    = defaultdict(float)
     by_type    = defaultdict(float)
@@ -309,17 +322,21 @@ def fetch_payments(company_name: str) -> dict:
     for p in all_rows:
         amt   = float(p.get("total_amount_of_payment_usdollars") or 0)
         total_paid += amt
+
         year  = str(p.get("program_year") or "Unknown")
         by_year[year] += amt
+
         ptype = p.get("nature_of_payment_or_transfer_of_value") or "Other"
         by_type[ptype] += amt
+
         state = p.get("recipient_state") or "Unknown"
         by_state[state] += amt
-        first = p.get("covered_recipient_first_name") or p.get("physician_first_name") or ""
-        last  = p.get("covered_recipient_last_name")  or p.get("physician_last_name")  or ""
+
+        first = p.get("covered_recipient_first_name") or ""
+        last  = p.get("covered_recipient_last_name")  or ""
         name  = f"{first} {last}".strip()
         if len(name) > 2:
-            spec  = p.get("covered_recipient_specialty_1") or p.get("physician_specialty") or ""
+            spec  = p.get("covered_recipient_specialty_1") or ""
             physicians[name]["total"]   += amt
             physicians[name]["count"]   += 1
             if not physicians[name]["specialty"] and spec:
@@ -328,7 +345,7 @@ def fetch_payments(company_name: str) -> dict:
                 physicians[name]["state"] = state
 
     return {
-        "resolved_name": resolved_name,
+        "resolved_name": company_name,
         "company_id":    company_id,
         "total_paid":    total_paid,
         "record_count":  len(all_rows),
