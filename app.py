@@ -639,11 +639,10 @@ def main():
             return
         with st.spinner(f"Fetching data for **{name1}**…"):
             data1 = load_all_data(name1, type1, cik1, secs1)
-st.write("RECALLS:", data1.get("recalls", {}))
-st.write("PAYMENTS:", data1.get("payments", {}))
+        st.write("RECALLS:", data1.get("recalls", {}))
+        st.write("PAYMENTS:", data1.get("payments", {}))
         st.subheader(name1)
         render_company(name1, type1, cik1, secs1, data1)
-
     else:
         if not name1 or not name2:
             st.error("Please enter both company names.")
