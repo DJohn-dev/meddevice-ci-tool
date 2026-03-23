@@ -337,25 +337,23 @@ def _lookup_company_id(company_name: str) -> tuple:
 
 
 def fetch_payments(company_name: str) -> dict:
-    """
-    Fetch Open Payments summary data by downloading pre-built CMS summary CSVs.
-    These are small files (~6K rows) aggregated by company and payment type.
-    Uses the company numeric ID (amgpo_id) for reliable filtering.
-
-    If no CIK provided, looks up company ID from the reporting entity profile CSV.
-    """
-    import io, csv
-
-    # Step 1: resolve company ID
-    # Intuitive Surgical's known ID is 100000005384 — but we look it up dynamically
-    company_id, resolved_name = _lookup_company_id(company_name)
-
-    if not company_id:
-        return {
-            "error": (f"Could not find '{company_name}' in Open Payments company registry. "
-                      "Check the exact legal name at openpaymentsdata.cms.gov."),
-            "resolved_name": company_name,
-        }
+    import io, csv, requests
+    profile_url = "https://download.cms.gov/openpayments/SMRY_RPTS_P01232026_01102026/PBLCTN_RPTG_ORG_PRFL_SRCH_P01232026_01102026.csv"
+    r = requests.get(profile_url, timeout=30)
+    content = r.content.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(content))
+    rows = list(reader)
+    first = rows[0] if rows else {}
+    # Find any row containing "Intuitive"
+    intuitive = [row for row in rows if any("intuitive" in str(v).lower() for v in row.values())]
+    return {
+        "error": "DEBUG",
+        "status": r.status_code,
+        "total_rows": len(rows),
+        "field_names": list(first.keys()),
+        "first_row": first,
+        "intuitive_rows": intuitive[:3],
+    }
 
     # Step 2: fetch summary rows for each year
     by_year  = {}
