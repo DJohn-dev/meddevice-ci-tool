@@ -320,15 +320,23 @@ def _fetch_summary_csv(csv_url: str, company_id: str) -> list:
 def _fetch_kol_csv(csv_url: str, company_id: str) -> list:
     """
     Download the covered-recipient-by-company summary CSV and filter by company ID.
-    Fields: amgpo_id, covered_recipient_profile_first_name, covered_recipient_profile_last_name,
-            covered_recipient_npi, recipient_state, total_amount, number_of_transaction
+    Uses streaming + size guard to avoid OOM on Streamlit Cloud free tier (1GB RAM).
+    Stops downloading after MAX_BYTES to be safe.
     """
     import io, csv
+    MAX_BYTES = 80 * 1024 * 1024  # 80MB limit
     try:
-        r = requests.get(csv_url, timeout=45)
+        r = requests.get(csv_url, timeout=45, stream=True)
         r.raise_for_status()
-        content = r.content.decode("utf-8-sig")
-        reader = csv.DictReader(io.StringIO(content))
+        chunks = []
+        total = 0
+        for chunk in r.iter_content(chunk_size=1024 * 256):
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_BYTES:
+                break
+        raw = b"".join(chunks).decode("utf-8-sig", errors="replace")
+        reader = csv.DictReader(io.StringIO(raw))
         rows = []
         for row in reader:
             rid = (row.get("amgpo_id") or row.get("AMGPO_ID") or
