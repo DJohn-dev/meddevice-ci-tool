@@ -449,7 +449,7 @@ def company_form(prefix, label):
         cik = st.text_input("CIK (for SEC filings)", key=f"{prefix}_cik",
                              placeholder="e.g. 1035267")
         if not cik:
-            _enc = urllib.parse.quote(name1.replace(",","").replace(".","")) if name1 else ""
+            _enc = urllib.parse.quote(name.replace(",","").replace(".","")) if name else ""
             _edgar = f"https://www.sec.gov/cgi-bin/browse-edgar?company={_enc}&match=starts-with&filenum=&State=&Country=&SIC=&myowner=exclude&action=getcompany"
             st.caption(f"[Find CIK on EDGAR →]({_edgar})")
     st.markdown("**Include sections:**")
